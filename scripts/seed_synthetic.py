@@ -120,6 +120,22 @@ def build(
     }
 
 
+def _write_disclosure_texts(statements: pd.DataFrame, out_dir: Path, count: int) -> int:
+    """ダミーの定性情報テキスト。分析の中身に意味はなく、件数の確認用."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    body = (
+        "当第{q}四半期におけるわが国経済は、緩やかな回復基調で推移いたしました。"
+        "このような状況のもと、当社グループは主力製品の拡販に注力し、"
+        "売上高は前年同期を上回りました。原材料価格の上昇は続いておりますが、"
+        "生産効率の改善により収益性を維持しております。"
+        "通期の見通しにつきましては、現時点で期初予想を据え置いております。"
+    )
+    for row in statements.head(count).itertuples():
+        text = body.format(q=getattr(row, "TypeOfCurrentPeriod", "1Q")[0]) * 3
+        (out_dir / f"{row.DisclosureNumber}.txt").write_text(text, encoding="utf-8")
+    return min(count, len(statements))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", default="data", help="出力先データディレクトリ")
@@ -127,6 +143,12 @@ def main() -> int:
     parser.add_argument("--start", default="2019-01-04")
     parser.add_argument("--end", default="2024-12-30")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--disclosure-texts",
+        type=int,
+        default=0,
+        help="開示テキストのダミーを何件書き出すか（takochu analyze --dry-run の確認用）",
+    )
     parser.add_argument(
         "--drift",
         type=float,
@@ -140,6 +162,12 @@ def main() -> int:
     for name, frame in built.items():
         rows = store.upsert(name, frame)
         print(f"{name:<18} {rows:>10,} 行")
+
+    if args.disclosure_texts:
+        written = _write_disclosure_texts(
+            built["statements"], Path(args.data_dir) / "disclosures", args.disclosure_texts
+        )
+        print(f"{'disclosures':<18} {written:>10,} 件")
 
     print(f"\n完了: {args.data_dir}")
     print("これは乱数から作った偽データです。損益に意味はありません。")

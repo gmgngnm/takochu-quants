@@ -19,6 +19,10 @@ from takochu.universe import build_universe
 
 log = logging.getLogger(__name__)
 
+LLM_COLUMNS = [
+    "llm_score", "llm_confidence", "llm_quality", "llm_tone", "llm_risk_count",
+]
+
 FUNDAMENTAL_COLUMNS = [
     "revision_op", "revision_sales", "revision_age_days",
     "sales_yoy", "op_yoy", "profit_yoy", "op_margin", "op_margin_delta",
@@ -89,6 +93,7 @@ def build_feature_panel(
     config,
     trading_days: pd.Series | None = None,
     announcements: pd.DataFrame | None = None,
+    llm_facts: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """(Date, Code) の特徴量パネルを返す."""
     universe_cfg = config.universe if hasattr(config, "universe") else config["universe"]
@@ -108,6 +113,18 @@ def build_feature_panel(
     else:
         available = [c for c in FUNDAMENTAL_COLUMNS if c in facts.columns]
         panel = asof_latest(panel, facts, value_columns=[*available, "available_date"])
+
+    if llm_facts is not None and not llm_facts.empty:
+        log.info("LLM 定性スコアを結合中... (%d 件)", len(llm_facts))
+        # ファンダ facts と同じ available_date を使うので PIT 規約は共通。
+        panel = asof_latest(
+            panel,
+            llm_facts,
+            value_columns=[c for c in LLM_COLUMNS if c in llm_facts.columns],
+        )
+    else:
+        for col in LLM_COLUMNS:
+            panel[col] = np.nan
 
     panel = _add_days_to_next_earnings(panel, statements, announcements)
 

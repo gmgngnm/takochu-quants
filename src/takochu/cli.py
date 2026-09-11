@@ -76,8 +76,12 @@ def cmd_features(args) -> int:
     trading_days = pd.to_datetime(calendar["Date"]) if not calendar.empty else None
 
     announcements = store.read("announcement")
+    try:
+        llm_facts = store.read_derived("llm_facts")
+    except FileNotFoundError:
+        llm_facts = None
     panel = build_feature_panel(
-        quotes, listed, statements, config, trading_days, announcements
+        quotes, listed, statements, config, trading_days, announcements, llm_facts
     )
     path = store.write_derived("panel", panel)
 
@@ -189,6 +193,182 @@ def cmd_screen(args) -> int:
     return 0
 
 
+
+# -------------------------------------------------------------------- analyze
+
+
+def cmd_analyze(args) -> int:
+    """決算開示の定性情報を Claude で構造化スコアに変換する."""
+    from takochu.llm.analyzer import ClaudeAnalyzer
+    from takochu.llm.sources import iter_disclosure_inputs
+    from takochu.llm.store import AnalysisCache, build_llm_facts, select_for_detail
+
+    config, store = _context(args)
+    statements = store.read("statements")
+    if statements.empty:
+        print("決算短信がありません。先に `takochu ingest` を実行してください。", file=sys.stderr)
+        return 1
+
+    text_dir = Path(args.text_dir) if args.text_dir else config.data_dir / "disclosures"
+    cache = AnalysisCache(config.data_dir / "derived" / "llm_analyses.jsonl")
+
+    detail_codes: set[str] = set()
+    if args.detail_top:
+        try:
+            from takochu.strategy.score import build_scores
+
+            panel = store.read_derived("panel")
+            scored = build_scores(panel, config.score_weights, config.portfolio["sector_field"])
+            detail_codes = select_for_detail(scored, args.detail_top)
+            print(f"精査対象（上位 {args.detail_top} 銘柄）: {len(detail_codes)} 件")
+        except FileNotFoundError:
+            print("パネル未作成のため、精査対象を選べません。全件スクリーニングのみ行います。")
+
+    items = list(
+        iter_disclosure_inputs(statements, text_dir, codes=args.codes, since=args.since)
+    )
+    print(f"テキストが揃っている開示: {len(items)} 件")
+
+    analyzer = ClaudeAnalyzer(use_fallbacks=not args.no_fallbacks, effort=args.effort)
+    pending = []
+    for item in items:
+        detailed = item.code in detail_codes
+        model = analyzer.detail_model if detailed else analyzer.screen_model
+        if item.cache_key(model) in cache:
+            continue
+        pending.append((item, detailed))
+
+    print(f"未分析（今回 API を呼ぶ件数）: {len(pending)} 件")
+    if args.dry_run:
+        print("\n--dry-run のため API は呼びません。")
+        return 0
+    if not pending:
+        print("すべてキャッシュ済みです。")
+
+    for i, (item, detailed) in enumerate(pending, 1):
+        if args.limit and i > args.limit:
+            print(f"--limit {args.limit} に達したので打ち切ります。")
+            break
+        model = analyzer.detail_model if detailed else analyzer.screen_model
+        analysis = analyzer.analyze(item, detailed=detailed)
+        if analysis is not None:
+            cache.put(item.cache_key(model), item.disclosure_number, item.code, model, analysis)
+        if i % 25 == 0:
+            print(f"  {i}/{len(pending)} 件完了")
+
+    calendar = store.read("trading_calendar")
+    trading_days = pd.to_datetime(calendar["Date"]) if not calendar.empty else None
+    facts = build_llm_facts(cache.to_frame(), statements, trading_days)
+    if not facts.empty:
+        path = store.write_derived("llm_facts", facts)
+        print(f"\nLLM facts を書き出しました: {path} ({len(facts):,} 件)")
+        print("`takochu features` を再実行するとパネルに反映されます。")
+
+    print("\n=== API 使用量 ===")
+    print(json.dumps(analyzer.cost_report(), ensure_ascii=False, indent=2))
+    return 0
+
+
+# --------------------------------------------------------------------- report
+
+
+def cmd_report(args) -> int:
+    """週次レポート（HTML）を生成する."""
+    from takochu.report import build_report, write_report
+    from takochu.strategy.score import build_scores, select_portfolio
+
+    config, store = _context(args)
+    panel = store.read_derived("panel")
+    scored = build_scores(panel, config.score_weights, config.portfolio["sector_field"])
+
+    all_dates = pd.DatetimeIndex(sorted(scored["Date"].unique()))
+    as_of = pd.Timestamp(args.date) if args.date else all_dates[-1]
+    snapshot = scored[scored["Date"] == as_of]
+    if snapshot.empty:
+        print(f"{as_of:%Y-%m-%d} のデータがありません。", file=sys.stderr)
+        return 1
+
+    idx = all_dates.searchsorted(as_of, side="right")
+    exec_date = all_dates[idx] if idx < len(all_dates) else None
+
+    picks = select_portfolio(snapshot, config.portfolio)
+
+    history_path = config.data_dir / "derived" / "picks_history.parquet"
+    previous = _previous_picks(history_path, as_of)
+
+    analyses = _analysis_details(config.data_dir)
+    if analyses is not None:
+        snapshot = snapshot.merge(analyses, on="Code", how="left")
+
+    capital = args.capital or config.backtest.get("initial_capital")
+    content = build_report(
+        picks=picks,
+        snapshot=snapshot,
+        decision_date=as_of,
+        exec_date=exec_date,
+        previous_picks=previous,
+        capital=capital,
+        diagnostics={"パネル最終日": f"{panel['Date'].max():%Y-%m-%d}"},
+    )
+
+    out = Path(args.out) if args.out else config.data_dir / "reports" / f"{as_of:%Y%m%d}.html"
+    write_report(out, content)
+    print(f"レポートを書き出しました: {out}")
+    n_exit = 0 if previous is None else len(set(previous["Code"]) - set(picks["Code"]))
+    print(f"  判断日 {as_of:%Y-%m-%d} / 買い {len(picks)} 銘柄 / 売り {n_exit} 銘柄")
+
+    if not args.no_save:
+        _save_picks(history_path, picks, as_of)
+        print(f"  保有履歴を更新しました: {history_path}")
+    return 0
+
+
+def _previous_picks(path: Path, as_of: pd.Timestamp) -> pd.DataFrame | None:
+    if not path.exists():
+        return None
+    history = pd.read_parquet(path)
+    history = history[pd.to_datetime(history["decision_date"]) < as_of]
+    if history.empty:
+        return None
+    latest = history["decision_date"].max()
+    return history[history["decision_date"] == latest]
+
+
+def _save_picks(path: Path, picks: pd.DataFrame, as_of: pd.Timestamp) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = picks.assign(decision_date=as_of)
+    if path.exists():
+        existing = pd.read_parquet(path)
+        existing = existing[pd.to_datetime(existing["decision_date"]) != as_of]
+        record = pd.concat([existing, record], ignore_index=True)
+    record.to_parquet(path, index=False)
+
+
+def _analysis_details(data_dir: Path) -> pd.DataFrame | None:
+    """レポートに載せる根拠テキストを、分析キャッシュから拾う."""
+    path = data_dir / "derived" / "llm_analyses.jsonl"
+    if not path.exists():
+        return None
+    rows = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    df["Code"] = df["code"].astype(str)
+    if "llm_confidence" not in df.columns:
+        df = df.rename(columns={"confidence": "llm_confidence"})
+    # 同じ銘柄に複数の開示があれば、最後に分析したものを載せる
+    df = df.drop_duplicates("Code", keep="last")
+    return df[["Code", "rationale", "risk_flags", "llm_confidence"]]
+
+
 # --------------------------------------------------------------------- doctor
 
 
@@ -267,6 +447,26 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--date", help="判断日 YYYY-MM-DD（省略時は最新）")
     p.add_argument("--out", help="CSV 出力先")
     p.set_defaults(func=cmd_screen)
+
+    p = sub.add_parser("analyze", help="決算開示を Claude で定性分析する")
+    p.add_argument("--text-dir", help="開示テキストの置き場（既定: data/disclosures）")
+    p.add_argument("--detail-top", type=int, default=100,
+                   help="上位何銘柄を上位モデルで精査するか（0 で精査なし）")
+    p.add_argument("--since", help="この日付以降の開示のみ YYYY-MM-DD")
+    p.add_argument("--codes", nargs="*", help="対象銘柄コードを限定する")
+    p.add_argument("--limit", type=int, help="API 呼び出しの上限件数")
+    p.add_argument("--effort", default="medium", choices=["low", "medium", "high", "xhigh", "max"])
+    p.add_argument("--no-fallbacks", action="store_true",
+                   help="拒否時のサーバ側フォールバックを使わない")
+    p.add_argument("--dry-run", action="store_true", help="件数だけ数えて API を呼ばない")
+    p.set_defaults(func=cmd_analyze)
+
+    p = sub.add_parser("report", help="週次レポート(HTML)を生成する")
+    p.add_argument("--date", help="判断日 YYYY-MM-DD（省略時は最新）")
+    p.add_argument("--out", help="出力先 HTML")
+    p.add_argument("--capital", type=float, help="投下資金。株数の算出に使う")
+    p.add_argument("--no-save", action="store_true", help="保有履歴を更新しない")
+    p.set_defaults(func=cmd_report)
 
     p = sub.add_parser("doctor", help="データ健全性を点検する")
     p.set_defaults(func=cmd_doctor)
