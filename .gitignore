@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# データレイクと成果物（サイズが大きく、再取得可能なのでコミットしない）
+data/
+reports/
+*.duckdb
+*.duckdb.wal

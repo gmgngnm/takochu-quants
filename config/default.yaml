@@ -1,0 +1,40 @@
+# ユニバース定義
+universe:
+  market_codes: ["0111"]          # 0111 = プライム
+  min_adv_yen: 300_000_000        # 20日平均売買代金の下限
+  min_market_cap_yen: 30_000_000_000
+  min_listing_days: 90            # 上場直後を除外
+  adv_window: 20
+
+# 特徴量
+features:
+  # 決算またぎ回避: 保有期間中に決算発表が来る銘柄はエントリしない
+  earnings_blackout_days: 10
+  atr_window: 14
+  vol_window: 20
+
+# ポートフォリオ
+portfolio:
+  n_positions: 15
+  weighting: inverse_vol          # equal | inverse_vol
+  max_weight: 0.08
+  max_sector_weight: 0.30
+  sector_field: Sector33Code
+  max_adv_participation: 0.005    # 1銘柄の発注量 / 20日平均売買代金
+
+# スコア合成の重み（バックテストで調整すること。初期値は仮説）
+score_weights:
+  revision: 0.35                  # 業績予想修正・サプライズ
+  quality: 0.15                   # 収益性・財務健全性
+  momentum: 0.20                  # トレンド
+  value: 0.10                     # バリュエーション（過熱抑制）
+  llm: 0.20                       # フェーズ2で追加。未算出なら自動で0扱い
+
+# バックテスト
+backtest:
+  start: "2018-01-01"
+  end: null                       # null = データ最終日
+  initial_capital: 10_000_000
+  rebalance: weekly               # 金曜引け後に判定し、翌営業日寄りで執行
+  cost_bps_oneway: 20             # 手数料+スプレッド+スリッページ（片道 0.20%）
+  max_gross: 1.0                  # レバレッジ禁止

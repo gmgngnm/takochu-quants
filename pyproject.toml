@@ -1,0 +1,37 @@
+[project]
+name = "takochu-quants"
+version = "0.1.0"
+description = "国内プライム株を対象とした週次スイング・ファンダメンタルズ分析基盤"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31",
+    "pandas>=2.1",
+    "numpy>=1.26",
+    "pyarrow>=14.0",
+    "duckdb>=0.10",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4", "ruff>=0.3"]
+
+[project.scripts]
+takochu = "takochu.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
