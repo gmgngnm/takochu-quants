@@ -369,6 +369,56 @@ def _analysis_details(data_dir: Path) -> pd.DataFrame | None:
     return df[["Code", "rationale", "risk_flags", "llm_confidence"]]
 
 
+
+# ------------------------------------------------------------------------ pwa
+
+
+def cmd_pwa(args) -> int:
+    """週次レポートを iPhone に入れられる PWA として書き出す."""
+    from takochu.pwa import build_pwa
+    from takochu.strategy.score import build_scores, select_portfolio
+
+    config, store = _context(args)
+    panel = store.read_derived("panel")
+    scored = build_scores(panel, config.score_weights, config.portfolio["sector_field"])
+
+    all_dates = pd.DatetimeIndex(sorted(scored["Date"].unique()))
+    as_of = pd.Timestamp(args.date) if args.date else all_dates[-1]
+    snapshot = scored[scored["Date"] == as_of]
+    if snapshot.empty:
+        print(f"{as_of:%Y-%m-%d} のデータがありません。", file=sys.stderr)
+        return 1
+
+    idx = all_dates.searchsorted(as_of, side="right")
+    exec_date = all_dates[idx] if idx < len(all_dates) else None
+
+    picks = select_portfolio(snapshot, config.portfolio)
+    analyses = _analysis_details(config.data_dir)
+    if analyses is not None:
+        snapshot = snapshot.merge(analyses, on="Code", how="left")
+
+    previous = _previous_picks(config.data_dir / "derived" / "picks_history.parquet", as_of)
+    out_dir = Path(args.out) if args.out else config.data_dir / "pwa"
+    index = build_pwa(
+        out_dir=out_dir,
+        picks=picks,
+        snapshot=snapshot,
+        decision_date=as_of,
+        exec_date=exec_date,
+        previous_picks=previous,
+        capital=args.capital or config.backtest.get("initial_capital"),
+    )
+
+    print(f"PWA を書き出しました: {index.parent}")
+    print(f"  判断日 {as_of:%Y-%m-%d} / 買い {len(picks)} 銘柄")
+    print("\n手元で確認する:")
+    print(f"  python -m http.server 8000 --directory {index.parent}")
+    print("\niPhone のホーム画面に入れるには HTTPS が必要です。")
+    print("  GitHub Pages などに置き、Safari で開いて 共有 → ホーム画面に追加")
+    print("  ※ 保有銘柄が載るので、公開リポジトリには置かないこと。")
+    return 0
+
+
 # --------------------------------------------------------------------- doctor
 
 
@@ -467,6 +517,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--capital", type=float, help="投下資金。株数の算出に使う")
     p.add_argument("--no-save", action="store_true", help="保有履歴を更新しない")
     p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("pwa", help="iPhone 用の PWA を書き出す")
+    p.add_argument("--date", help="判断日 YYYY-MM-DD（省略時は最新）")
+    p.add_argument("--out", help="出力先ディレクトリ")
+    p.add_argument("--capital", type=float, help="投下資金。株数の算出に使う")
+    p.set_defaults(func=cmd_pwa)
 
     p = sub.add_parser("doctor", help="データ健全性を点検する")
     p.set_defaults(func=cmd_doctor)
