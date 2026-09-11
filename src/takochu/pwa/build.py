@@ -36,12 +36,14 @@ def build_pwa(
     exec_date: pd.Timestamp | None,
     previous_picks: pd.DataFrame | None = None,
     capital: float | None = None,
+    alerts: dict | None = None,
 ) -> Path:
     """PWA 一式を out_dir に書き出し、index.html のパスを返す."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     payload = _payload(picks, snapshot, decision_date, exec_date, previous_picks, capital)
+    payload["alerts"] = _alerts(alerts)
     build_id = f"{decision_date:%Y%m%d}-{len(payload['buys'])}-{len(payload['sells'])}"
 
     index = (
@@ -136,6 +138,25 @@ def _payload(
         "buys": buys,
         "sells": sells,
     }
+
+
+def _alerts(alerts: dict | None) -> list[dict]:
+    """monitor が出した手仕舞い推奨。週次の判断とは別に、最優先で見せる."""
+    if not alerts:
+        return []
+    records = alerts.get("alerts") or []
+    return [
+        {
+            "code": str(a.get("code")),
+            "reason": "損切り" if a.get("reason") == "stop_loss" else "利確",
+            "kind": str(a.get("reason")),
+            "change": a.get("change"),
+            "touchedOn": a.get("touched_on"),
+            "entry": a.get("entry_price"),
+            "last": a.get("last_close"),
+        }
+        for a in records
+    ]
 
 
 def _f(value) -> float | None:
@@ -305,6 +326,12 @@ h2 .count { font-family: var(--mono); font-size: 0.78rem; color: var(--muted); f
 .item .qty { text-align: right; font-variant-numeric: tabular-nums; }
 .item .qty .shares { font-family: var(--mono); font-size: 1rem; font-weight: 600; }
 .item .qty .shares.skip { color: var(--crimson); font-family: inherit; font-size: 0.88rem; }
+.item.alert { border-color: color-mix(in srgb, var(--crimson) 45%, var(--rule)); }
+.item .qty .shares.reason-label {
+  font-family: inherit; font-size: 0.9rem; color: var(--ink);
+}
+.item .qty .amount.pos { color: var(--crimson); }
+.item .qty .amount.neg { color: var(--moss); }
 .item .qty .amount { font-size: 0.76rem; color: var(--muted); }
 
 .tick {
@@ -412,6 +439,13 @@ dialog pre {
     <b>これは売買提案であって発注ではありません。</b>
     システムが知らない材料（指数除外・不祥事・TOB・直近の報道）は自分で確認すること。
   </div>
+
+  <section id="alert-section" hidden>
+    <h2>0. 手仕舞い（優先）<span class="count" id="alert-count"></span></h2>
+    <p class="hint">利確・損切りの水準に達した保有。週次の入替より先に処理する。</p>
+    <div class="list" id="alerts"></div>
+    <p class="hint">日足ベースの判定。ザラ場で即座に反応するには証券会社の API が要る。</p>
+  </section>
 
   <div id="unbuyable"></div>
 
@@ -548,8 +582,39 @@ function card(entry, kind) {
   return item;
 }
 
+function alertCard(a) {
+  const id = 'alert:' + a.code;
+  const item = el('div', 'item alert' + (checked.has(id) ? ' checked' : ''));
+  const top = el('div', 'top');
+  const left = el('div', 'row');
+  left.append(el('div', 'tick', '✓'));
+  const names = el('div');
+  names.appendChild(el('div', 'code', a.code));
+  names.appendChild(el('div', 'sub', a.touchedOn + ' に到達 · 全株を手仕舞う'));
+  left.appendChild(names);
+
+  const qty = el('div', 'qty');
+  const pct = a.change === null || a.change === undefined
+    ? '—' : (a.change >= 0 ? '+' : '') + (a.change * 100).toFixed(1) + '%';
+  // ラベルは中立色。色は騰落率だけに使う（日本式で赤=上げ・緑=下げ）。
+  // 「損切り」を下落色で出すと良い知らせに見えてしまう。
+  qty.appendChild(el('div', 'shares reason-label', a.reason));
+  const move = el('div', 'amount ' + (a.change >= 0 ? 'pos' : 'neg'), pct);
+  qty.appendChild(move);
+  top.append(left, qty);
+  item.appendChild(top);
+
+  top.addEventListener('click', () => {
+    if (checked.has(id)) { checked.delete(id); } else { checked.add(id); }
+    item.classList.toggle('checked');
+    persist();
+    render();
+  });
+  return item;
+}
+
 function render() {
-  const total = DATA.buys.length + DATA.sells.length;
+  const total = DATA.buys.length + DATA.sells.length + (DATA.alerts || []).length;
   const done = [...checked].length;
   document.getElementById('progress-text').innerHTML =
     '<b>' + done + '</b> / ' + total + ' 確認済み';
@@ -579,6 +644,14 @@ function boot() {
     document.getElementById('unbuyable').appendChild(box);
   }
 
+  if (DATA.alerts && DATA.alerts.length) {
+    const section = document.getElementById('alert-section');
+    section.hidden = false;
+    document.getElementById('alert-count').textContent = DATA.alerts.length + '件';
+    const list = document.getElementById('alerts');
+    DATA.alerts.forEach((a) => list.appendChild(alertCard(a)));
+  }
+
   const sells = document.getElementById('sells');
   document.getElementById('sell-count').textContent = DATA.sells.length + '件';
   if (!DATA.sells.length) {
@@ -604,6 +677,10 @@ function boot() {
 
 function memoText() {
   const lines = [DATA.decisionDate + ' 判断 / ' + (DATA.execDate || '翌営業日') + ' 寄りで執行'];
+  if (DATA.alerts && DATA.alerts.length) {
+    lines.push('', '【手仕舞い】利確・損切り到達');
+    DATA.alerts.forEach((a) => lines.push(a.code + '  全株  (' + a.reason + ')'));
+  }
   if (DATA.sells.length) {
     lines.push('', '【売り】');
     DATA.sells.forEach((s) => lines.push(s.code + '  全株'));

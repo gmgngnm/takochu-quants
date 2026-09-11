@@ -398,6 +398,15 @@ def cmd_pwa(args) -> int:
         snapshot = snapshot.merge(analyses, on="Code", how="left")
 
     previous = _previous_picks(config.data_dir / "derived" / "picks_history.parquet", as_of)
+
+    alerts = None
+    alerts_path = config.data_dir / "derived" / "alerts.json"
+    if alerts_path.exists():
+        alerts = json.loads(alerts_path.read_text(encoding="utf-8"))
+        # 古い週のアラートを混ぜない
+        if alerts.get("decisionDate") != f"{as_of:%Y-%m-%d}":
+            alerts = None
+
     out_dir = Path(args.out) if args.out else config.data_dir / "pwa"
     index = build_pwa(
         out_dir=out_dir,
@@ -407,6 +416,7 @@ def cmd_pwa(args) -> int:
         exec_date=exec_date,
         previous_picks=previous,
         capital=args.capital or config.backtest.get("initial_capital"),
+        alerts=alerts,
     )
 
     print(f"PWA を書き出しました: {index.parent}")
@@ -416,6 +426,81 @@ def cmd_pwa(args) -> int:
     print("\niPhone のホーム画面に入れるには HTTPS が必要です。")
     print("  GitHub Pages などに置き、Safari で開いて 共有 → ホーム画面に追加")
     print("  ※ 保有銘柄が載るので、公開リポジトリには置かないこと。")
+    return 0
+
+
+
+# ------------------------------------------------------------------- monitor
+
+
+def cmd_monitor(args) -> int:
+    """保有中の銘柄が利確・損切りの水準に達していないか点検する."""
+    from takochu.monitor import alerts_to_records, check_holdings
+
+    config, store = _context(args)
+    panel = store.read_derived("panel")
+
+    history_path = config.data_dir / "derived" / "picks_history.parquet"
+    if not history_path.exists():
+        print("保有履歴がありません。先に `takochu report` を実行してください。", file=sys.stderr)
+        return 1
+
+    history = pd.read_parquet(history_path)
+    history["decision_date"] = pd.to_datetime(history["decision_date"])
+    decision_date = history["decision_date"].max()
+    holdings = history[history["decision_date"] == decision_date]
+
+    holding_cfg = dict(config.holding)
+    for key in ("take_profit", "stop_loss", "stop_loss_atr"):
+        value = getattr(args, key)
+        if value is not None:
+            holding_cfg[key] = value
+
+    if all(holding_cfg.get(k) is None for k in ("take_profit", "stop_loss", "stop_loss_atr")):
+        print("利確・損切りの水準が設定されていません。", file=sys.stderr)
+        print("config/default.yaml の holding か、--stop-loss / --take-profit で指定してください。",
+              file=sys.stderr)
+        return 1
+
+    alerts, status = check_holdings(panel, holdings, decision_date, holding_cfg)
+
+    print(f"=== 保有 {len(holdings)} 銘柄 / {decision_date:%Y-%m-%d} 判断 "
+          f"/ 最終データ {panel['Date'].max():%Y-%m-%d} ===\n")
+    if status.empty:
+        print("点検できる保有がありません。")
+        return 0
+
+    display = status.assign(
+        change=lambda d: (d["change"] * 100).round(2).astype(str) + "%",
+        reason=lambda d: d["reason"].map({"stop_loss": "損切り", "take_profit": "利確"}).fillna(""),
+    )
+    with pd.option_context("display.width", 200, "display.max_columns", 20):
+        print(display.round(1).to_string(index=False))
+
+    if alerts:
+        print(f"\n!! 手仕舞い推奨 {len(alerts)} 件")
+        for a in alerts:
+            label = "損切り" if a.reason == "stop_loss" else "利確"
+            print(f"  {a.code}  {label}  {a.touched_on} に {a.trigger_price:,.0f} 到達"
+                  f"  (エントリー {a.entry_price:,.0f} / 直近 {a.last_close:,.0f}"
+                  f" / {a.change:+.1%})")
+        print("\n  日足ベースの判定です。実際に手仕舞えるのは翌営業日以降。")
+        print("  ザラ場で即座に反応したい場合は、証券会社の API と逆指値注文が必要です。")
+    else:
+        print("\n水準に達した銘柄はありません。")
+
+    out = config.data_dir / "derived" / "alerts.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps(
+            {"decisionDate": f"{decision_date:%Y-%m-%d}",
+             "asOf": f"{panel['Date'].max():%Y-%m-%d}",
+             "alerts": alerts_to_records(alerts)},
+            ensure_ascii=False, indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(f"\n{out} に保存しました（PWA に表示されます）。")
     return 0
 
 
@@ -517,6 +602,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--capital", type=float, help="投下資金。株数の算出に使う")
     p.add_argument("--no-save", action="store_true", help="保有履歴を更新しない")
     p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("monitor", help="保有中の利確・損切り水準を点検する")
+    p.add_argument("--take-profit", type=float, help="利確ライン 例: 0.08")
+    p.add_argument("--stop-loss", type=float, help="損切りライン 例: 0.05")
+    p.add_argument("--stop-loss-atr", type=float, help="ATR 倍率での損切り 例: 2.0")
+    p.set_defaults(func=cmd_monitor)
 
     p = sub.add_parser("pwa", help="iPhone 用の PWA を書き出す")
     p.add_argument("--date", help="判断日 YYYY-MM-DD（省略時は最新）")

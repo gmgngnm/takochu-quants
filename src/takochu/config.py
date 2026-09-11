@@ -35,6 +35,10 @@ class Config:
         return self.raw["features"]
 
     @property
+    def holding(self) -> dict[str, Any]:
+        return self.raw.get("holding", {})
+
+    @property
     def portfolio(self) -> dict[str, Any]:
         return self.raw["portfolio"]
 

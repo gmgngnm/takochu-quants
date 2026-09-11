@@ -15,6 +15,7 @@ class _Cfg:
     """run_backtest が受け取る最小限の設定オブジェクト."""
 
     def __init__(self, **kwargs):
+        self.holding = kwargs.get("holding", {})
         self.backtest = kwargs.get("backtest", {})
         self.portfolio = kwargs.get("portfolio", {})
         self.score_weights = kwargs.get("score_weights", {})
@@ -32,6 +33,8 @@ def _flat_panel(n_days: int = 60, n_codes: int = 10, daily_return: float = 0.0):
                     "Date": dates,
                     "Code": f"{1000 + i}0",
                     "open": price,
+                    "high": price,
+                    "low": price,
                     "close": price,
                     "raw_close": price,
                     "vol_20": 0.3,

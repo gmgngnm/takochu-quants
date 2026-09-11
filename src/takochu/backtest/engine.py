@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from takochu.backtest.exits import resolve_stop_loss, simulate_exits
 from takochu.strategy.score import build_scores, select_portfolio
 
 log = logging.getLogger(__name__)
@@ -72,8 +73,19 @@ def run_backtest(
     all_dates = pd.DatetimeIndex(sorted(panel["Date"].unique()))
     opens = _price_matrix(panel, "open")
     closes = _price_matrix(panel, "close")
+    # 高値・安値は利確/損切り判定にだけ使う。列が無いパネルでは終値で代用する。
+    highs = _price_matrix(panel, "high") if "high" in panel.columns else closes
+    lows = _price_matrix(panel, "low") if "low" in panel.columns else closes
     # 寄り値が欠ける日は同日終値で代用する（薄商いの銘柄で起きる）
     exec_px = opens.combine_first(closes)
+
+    hold_cfg = getattr(config, "holding", None)
+    if hold_cfg is None and hasattr(config, "get"):
+        hold_cfg = config.get("holding")
+    hold_cfg = hold_cfg or {}
+    weekend_flat = bool(hold_cfg.get("weekend_flat", False))
+    take_profit = hold_cfg.get("take_profit")
+    take_profit = float(take_profit) if take_profit is not None else None
 
     cost_rate = float(bt_cfg.get("cost_bps_oneway", 20)) / 10_000.0
     capital = float(bt_cfg.get("initial_capital", 10_000_000))
@@ -93,9 +105,19 @@ def run_backtest(
             continue  # 執行日がまだ来ていない最終週は捨てる
         schedule.append((d, all_dates[idx]))
 
+    exit_counts: dict[str, int] = {}
+
     for i, (decision_date, exec_date) in enumerate(schedule):
+        next_decision = schedule[i + 1][0] if i + 1 < len(schedule) else all_dates[-1]
         next_exec = schedule[i + 1][1] if i + 1 < len(schedule) else all_dates[-1]
-        if next_exec <= exec_date:
+
+        # weekend_flat: 金曜の引けで手仕舞い、週末はノーポジ。
+        # 通常: 翌週の寄りまで持ち越す。
+        if weekend_flat:
+            final_date, final_matrix = next_decision, closes
+        else:
+            final_date, final_matrix = next_exec, exec_px
+        if final_date <= exec_date:
             break
 
         snapshot = panel[panel["Date"] == decision_date]
@@ -116,17 +138,54 @@ def run_backtest(
         else:
             codes = target_w.index
             p0 = exec_px.reindex(index=[exec_date], columns=codes).iloc[0]
-            p1 = exec_px.reindex(index=[next_exec], columns=codes).iloc[0]
+            p1 = final_matrix.reindex(index=[final_date], columns=codes).iloc[0]
             # 値が取れない銘柄（売買停止・上場廃止）はリターン 0 として扱い、
             # 次回リバランスで自然に外れる。件数は diagnostics に残す。
             bad = p0.isna() | p1.isna() | (p0 <= 0)
             missing_price_events += int(bad.sum())
-            stock_return = (p1 / p0 - 1.0).where(~bad, 0.0).astype("float64")
+
+            _, stop_series = resolve_stop_loss(hold_cfg, snapshot, codes)
+            stop_loss = stop_series if stop_series is not None else hold_cfg.get("stop_loss")
+            if stop_series is None and stop_loss is not None:
+                stop_loss = float(stop_loss)
+
+            window = all_dates[(all_dates > exec_date) & (all_dates <= final_date)]
+            result = simulate_exits(
+                codes=codes,
+                entry_price=p0,
+                final_price=p1.where(~bad, p0),
+                final_date=final_date,
+                window_dates=window,
+                opens=opens,
+                highs=highs,
+                lows=lows,
+                take_profit=take_profit,
+                stop_loss=stop_loss,
+            )
+            stock_return = result.returns.where(~bad, 0.0).astype("float64")
             period_return = float((target_w * stock_return).sum())
 
+            for reason, count in result.reasons.value_counts().items():
+                exit_counts[str(reason)] = exit_counts.get(str(reason), 0) + int(count)
+
             grown = target_w * (1.0 + stock_return)
-            total = grown.sum()
-            held_weights = grown / total if total else grown
+            # 週末ノーポジなら全部売る。利確・損切りに掛かった銘柄も
+            # その時点で現金化されているので、持ち越しウェイトから外す。
+            portfolio_value = float(grown.sum())
+            if weekend_flat:
+                exit_value = portfolio_value
+                held_weights = pd.Series(dtype="float64")
+            else:
+                exit_value = float(grown[result.triggered].sum())
+                # 資産全体で割る（残った銘柄だけで正規化すると、現金化した分が
+                # 消えてしまい、買い戻しの回転率を過小評価する）。
+                remaining = grown[~result.triggered]
+                held_weights = (
+                    remaining / portfolio_value if portfolio_value else remaining
+                )
+            # 手仕舞いの売り注文にもコストがかかる
+            cost += exit_value * cost_rate
+            turnover += exit_value
 
         net_return = period_return - cost
         equity *= 1.0 + net_return
@@ -135,7 +194,7 @@ def run_backtest(
             {
                 "decision_date": decision_date,
                 "exec_date": exec_date,
-                "date": next_exec,
+                "date": final_date,
                 "n_positions": int(len(target_w)),
                 "gross_return": period_return,
                 "turnover": turnover,
@@ -155,5 +214,7 @@ def run_backtest(
         "avg_positions": float(equity_df["n_positions"].mean()) if len(equity_df) else 0.0,
         "avg_turnover": float(equity_df["turnover"].mean()) if len(equity_df) else 0.0,
         "total_cost_paid": float(equity_df["cost"].sum()) if len(equity_df) else 0.0,
+        "weekend_flat": weekend_flat,
+        "exits": exit_counts,
     }
     return BacktestResult(equity=equity_df, trades=trades_df, diagnostics=diagnostics)
