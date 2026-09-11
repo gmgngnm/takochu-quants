@@ -279,6 +279,12 @@ python -m http.server 8000 --directory data/pwa    # 手元で確認
 
 `.github/workflows/deploy-pwa.yml` が UI デモを Pages に配置する。
 
+**初回だけ手動の準備が要る**: リポジトリの
+Settings → Pages → Build and deployment → Source を **GitHub Actions** にする。
+Actions のトークンでは Pages サイトを新規作成できないため、ここは自動化できない。
+設定後に main へ push するか、Actions から手動実行すれば配置される。
+公開先は `https://<ユーザー名>.github.io/takochu-quants/`。
+
 **このリポジトリは public なので、ワークフローは合成データ（架空の銘柄）しか扱わない。**
 実データを公開 Pages に載せる経路は意図的に作っていない。ビルド後に
 `isDemo` の印がなければ公開を止めるガードも入れてある。
