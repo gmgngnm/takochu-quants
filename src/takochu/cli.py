@@ -417,6 +417,7 @@ def cmd_pwa(args) -> int:
         previous_picks=previous,
         capital=args.capital or config.backtest.get("initial_capital"),
         alerts=alerts,
+        demo=args.demo,
     )
 
     print(f"PWA を書き出しました: {index.parent}")
@@ -613,6 +614,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--date", help="判断日 YYYY-MM-DD（省略時は最新）")
     p.add_argument("--out", help="出力先ディレクトリ")
     p.add_argument("--capital", type=float, help="投下資金。株数の算出に使う")
+    p.add_argument("--demo", action="store_true",
+                   help="架空データである旨をページに表示する（公開先で取り違えないため）")
     p.set_defaults(func=cmd_pwa)
 
     p = sub.add_parser("doctor", help="データ健全性を点検する")

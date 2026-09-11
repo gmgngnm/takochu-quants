@@ -1,0 +1,85 @@
+# PWA のデモを GitHub Pages に配置する。
+#
+# このリポジトリは public なので、Pages も誰でも見られる。
+# したがってこのワークフローは **合成データ（架空の銘柄）しか扱わない**。
+# 実際の保有銘柄を公開 Pages に載せる経路は、意図的に作っていない。
+#
+# 実データで使う場合は、この成果物をローカルで作り
+# (`takochu pwa --capital ...`)、プライベートなホストに置くこと。
+
+name: Deploy PWA demo to Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/takochu/pwa/**"
+      - "src/takochu/report.py"
+      - "scripts/seed_synthetic.py"
+      - "config/default.yaml"
+      - ".github/workflows/deploy-pwa.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同時に走らせない。実行中のデプロイは完走させる。
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: pip install -e "."
+
+      - name: Build demo data
+        env:
+          TAKOCHU_DATA_DIR: ${{ runner.temp }}/demo
+        run: |
+          set -euxo pipefail
+          python scripts/seed_synthetic.py \
+            --data-dir "$TAKOCHU_DATA_DIR" \
+            --codes 120 --start 2021-01-04 --end 2024-12-30
+          takochu features
+          # 2週間前を判断日にして report を出し、その後の値動きを monitor に拾わせる。
+          # こうするとデモに「手仕舞い（優先）」の節が出る。
+          takochu report --date 2024-12-13 --capital 30000000
+          takochu monitor --stop-loss 0.03 --take-profit 0.05
+          takochu pwa --date 2024-12-13 --capital 30000000 --demo --out dist
+
+      - name: Guard against real data
+        run: |
+          set -euo pipefail
+          # 架空データである印が入っていなければ公開しない
+          grep -q '"isDemo": true' dist/index.html
+          echo "デモ表示を確認しました。"
+
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

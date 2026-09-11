@@ -37,6 +37,7 @@ def build_pwa(
     previous_picks: pd.DataFrame | None = None,
     capital: float | None = None,
     alerts: dict | None = None,
+    demo: bool = False,
 ) -> Path:
     """PWA 一式を out_dir に書き出し、index.html のパスを返す."""
     out_dir = Path(out_dir)
@@ -44,6 +45,8 @@ def build_pwa(
 
     payload = _payload(picks, snapshot, decision_date, exec_date, previous_picks, capital)
     payload["alerts"] = _alerts(alerts)
+    # 架空データであることをページ自身に持たせる。公開先で取り違えられないように。
+    payload["isDemo"] = bool(demo)
     build_id = f"{decision_date:%Y%m%d}-{len(payload['buys'])}-{len(payload['sells'])}"
 
     index = (
@@ -440,6 +443,12 @@ dialog pre {
     システムが知らない材料（指数除外・不祥事・TOB・直近の報道）は自分で確認すること。
   </div>
 
+  <div class="notice" id="demo-banner" hidden style="border-style:dashed">
+    <b>これは UI デモです。</b>
+    表示されている銘柄コード・株価・スコアはすべて<b>乱数から作った架空のデータ</b>で、
+    実在の銘柄とも相場とも関係ありません。
+  </div>
+
   <section id="alert-section" hidden>
     <h2>0. 手仕舞い（優先）<span class="count" id="alert-count"></span></h2>
     <p class="hint">利確・損切りの水準に達した保有。週次の入替より先に処理する。</p>
@@ -643,6 +652,8 @@ function boot() {
       ' 件</b>あります。そのまま買うとウェイトが崩れます。資金を増やすか銘柄数を減らしてください。';
     document.getElementById('unbuyable').appendChild(box);
   }
+
+  if (DATA.isDemo) document.getElementById('demo-banner').hidden = false;
 
   if (DATA.alerts && DATA.alerts.length) {
     const section = document.getElementById('alert-section');
